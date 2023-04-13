@@ -3,10 +3,12 @@ package part4_techniques
 import akka.{Done, NotUsed}
 import akka.actor.{Actor, ActorSystem, Cancellable}
 import akka.stream.javadsl.ZipWith
-import akka.stream.{ActorMaterializer, ClosedShape, CompletionStrategy, Materializer, OverflowStrategy, UniformFanInShape}
-import akka.stream.scaladsl.{Broadcast, Flow, GraphDSL, Keep, Merge, RunnableGraph, Sink, Source}
+import akka.stream.{ActorMaterializer, ClosedShape, CompletionStrategy, FanInShape, FlowShape, Graph, Inlet, Materializer, Outlet, OverflowStrategy, Shape, SourceShape, UniformFanInShape}
+import akka.stream.scaladsl.{Balance, Broadcast, Flow, GraphDSL, Keep, Merge, MergePreferred, RunnableGraph, Sink, Source, Zip}
+import org.scalatest.Matchers.{convertToAnyShouldWrapper, equal}
 import scala.collection.immutable
-import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.concurrent.duration.DurationInt
+import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.util.{Failure, Success}
 
 object FaultTolerance extends App {
@@ -16,34 +18,67 @@ object FaultTolerance extends App {
 
   implicit val ec: ExecutionContext = ExecutionContext.global
 
-  val pickMaxOfThree = GraphDSL.create() { implicit b =>
-    import GraphDSL.Implicits._
+  import FanInShape.{Init, Name}
 
-    val zip1 = b.add(ZipWith.create[Int, Int, Int](math.max(_, _)))
-    val zip2 = b.add(ZipWith.create[Int, Int, Int](math.max(_, _)))
-    zip1.out ~> zip2.in0
+  //  class PriorityWorkerPoolShape2[In, Out](_init: Init[Out] = Name("PriorityWorkerPool"))
+  //    extends FanInShape[Out](_init) {
+  //    protected override def construct(i: Init[Out]) = new PriorityWorkerPoolShape2(i)
+  //
+  //    val jobsIn = newInlet[In]("jobsIn")
+  //    val priorityJobsIn = newInlet[In]("priorityJobsIn")
+  //    // Outlet[Out] with name "out" is automatically created
+  //  }
 
-    UniformFanInShape(zip2.out, zip1.in0, zip1.in1, zip2.in1)
+  // A shape represents the input and output ports of a reusable
+  // processing module
+  case class PriorityWorkerPoolShape[In, Out](jobsIn: Inlet[In], priorityJobsIn: Inlet[In], resultsOut: Outlet[Out])
+    extends Shape {
+
+    // It is important to provide the list of all input and output
+    // ports with a stable order. Duplicates are not allowed.
+    override val inlets: immutable.Seq[Inlet[_]] =
+    jobsIn :: priorityJobsIn :: Nil
+    override val outlets: immutable.Seq[Outlet[_]] =
+      resultsOut :: Nil
+
+    // A Shape must be able to create a copy of itself. Basically
+    // it means a new instance with copies of the ports
+    override def deepCopy() =
+      PriorityWorkerPoolShape(jobsIn.carbonCopy(), priorityJobsIn.carbonCopy(), resultsOut.carbonCopy())
+
   }
 
-  val resultSink = Sink.head[Int]
+  object PriorityWorkerPool {
+    def apply[In, Out](
+                        worker: Flow[In, Out, Any],
+                        workerCount: Int): Graph[PriorityWorkerPoolShape[In, Out], NotUsed] = {
 
-  val g = RunnableGraph.fromGraph(GraphDSL.createGraph(resultSink) { implicit b =>
-    sink =>
-      import GraphDSL.Implicits._
+      GraphDSL.create() { implicit b =>
+        import GraphDSL.Implicits._
 
-      // importing the partial graph will return its shape (inlets & outlets)
-      val pm3 = b.add(pickMaxOfThree)
+        val priorityMerge = b.add(MergePreferred[In](1))
+        val balance = b.add(Balance[In](workerCount))
+        val resultsMerge = b.add(Merge[Out](workerCount))
 
-      Source.single(1) ~> pm3.in(0)
-      Source.single(2) ~> pm3.in(1)
-      Source.single(3) ~> pm3.in(2)
-      pm3.out ~> sink.in
-      ClosedShape
-  })
+        // After merging priority and ordinary jobs, we feed them to the balancer
+        priorityMerge ~> balance
 
-  val max: Future[Int] = g.run()
+        // Wire up each of the outputs of the balancer to a worker flow
+        // then merge them back
+        for (i <- 0 until workerCount)
+          balance.out(i) ~> worker ~> resultsMerge.in(i)
 
-  max.onComplete(println(_))
+        // We now expose the input ports of the priorityMerge and the output
+        // of the resultsMerge as our PriorityWorkerPool ports
+        // -- all neatly wrapped in our domain specific Shape
+        PriorityWorkerPoolShape(
+          jobsIn = priorityMerge.in(0),
+          priorityJobsIn = priorityMerge.preferred,
+          resultsOut = resultsMerge.out)
+      }
+
+    }
+
+  }
 
 }
