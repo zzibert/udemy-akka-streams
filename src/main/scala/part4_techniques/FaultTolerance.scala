@@ -4,7 +4,7 @@ import akka.{Done, NotUsed}
 import akka.actor.{Actor, ActorSystem, Cancellable}
 import akka.stream.scaladsl.GraphDSL.Implicits.{FanInOps, SourceArrow, fanOut2flow}
 import akka.stream.scaladsl.Tcp.OutgoingConnection
-import akka.stream.scaladsl.{Balance, Broadcast, Concat, Flow, GraphDSL, Keep, Merge, MergeHub, MergePreferred, RunnableGraph, Sink, Source, Tcp, Zip, ZipWith}
+import akka.stream.scaladsl.{Balance, Broadcast, BroadcastHub, Concat, Flow, GraphDSL, Keep, Merge, MergeHub, MergePreferred, RunnableGraph, Sink, Source, Tcp, Zip, ZipWith}
 import akka.stream.{ActorMaterializer, Attributes, ClosedShape, CompletionStrategy, DelayOverflowStrategy, FanInShape, FlowShape, Graph, Inlet, KillSwitches, Materializer, Outlet, OverflowStrategy, Shape, SourceShape, UniformFanInShape}
 import akka.util.ByteString
 import org.scalatest.Matchers.{convertToAnyShouldWrapper, equal}
@@ -22,22 +22,23 @@ object FaultTolerance extends App {
   implicit val ec: ExecutionContext = ExecutionContext.global
 
 
-  // A simple consumer that will print to the console for now
-  val consumer = Sink.foreach(println)
+  // A simple producer that publishes a new "message" every second
+  val producer = Source.tick(1.second, 1.second, "New message")
 
-  // Attach a MergeHub Source to the consumer. This will materialize to a
-  // corresponding Sink.
-  val runnableGraph: RunnableGraph[Sink[String, NotUsed]] =
-  MergeHub.source[String](perProducerBufferSize = 16).to(consumer)
+  // Attach a BroadcastHub Sink to the producer. This will materialize to a
+  // corresponding Source.
+  // (We need to use toMat and Keep.right since by default the materialized
+  // value to the left is used)
+  val runnableGraph: RunnableGraph[Source[String, NotUsed]] =
+  producer.toMat(BroadcastHub.sink(bufferSize = 256))(Keep.right)
 
-  // By running/materializing the consumer we get back a Sink, and hence
-  // now have access to feed elements into it. This Sink can be materialized
-  // any number of times, and every element that enters the Sink will
-  // be consumed by our consumer.
-  val toConsumer: Sink[String, NotUsed] = runnableGraph.run()
+  // By running/materializing the producer, we get back a Source, which
+  // gives us access to the elements published by the producer.
+  val fromProducer: Source[String, NotUsed] = runnableGraph.run()
 
-  // Feeding two independent sources into the hub.
-  Source.tick(0.millis, 500.millis, "ihihihih").runWith(toConsumer)
-  Source.tick(0.millis, 300.millis, "Trololo").runWith(toConsumer)
+  // Print out messages from the producer in two independent consumers
+  fromProducer.runForeach(msg => println("consumer1: " + msg))
+  fromProducer.runForeach(msg => println("consumer2: " + msg))
+  fromProducer.runForeach(msg => println("consumer3: " + msg))
 
 }
