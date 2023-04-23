@@ -29,26 +29,29 @@ object FaultTolerance extends App {
   import akka.stream.stage.GraphStageLogic
   import akka.stream.stage.OutHandler
 
-  class NumbersSource extends GraphStage[SourceShape[Int]] {
-    val out: Outlet[Int] = Outlet("NumbersSource")
-    override val shape: SourceShape[Int] = SourceShape(out)
+  import akka.stream.Attributes
+  import akka.stream.Inlet
+  import akka.stream.SinkShape
+  import akka.stream.stage.GraphStage
+  import akka.stream.stage.GraphStageLogic
+  import akka.stream.stage.InHandler
+
+  class StdoutSink extends GraphStage[SinkShape[Int]] {
+    val in: Inlet[Int] = Inlet("StdoutSink")
+    override val shape: SinkShape[Int] = SinkShape(in)
 
     override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
       new GraphStageLogic(shape) {
-        // All state MUST be inside the GraphStageLogic,
-        // never inside the enclosing GraphStage.
-        // This state is safe to access and modify from all the
-        // callbacks that are provided by GraphStageLogic and the
-        // registered handlers.
-        private var counter = 1
 
-        setHandler(out, new OutHandler {
-          override def onPull(): Unit = {
-            push(out, counter)
-            counter += 1
+        // This requests one element at the Sink startup.
+        override def preStart(): Unit = pull(in)
+
+        setHandler(in, new InHandler {
+          override def onPush(): Unit = {
+            println(grab(in))
+            pull(in)
           }
         })
       }
   }
-
 }
