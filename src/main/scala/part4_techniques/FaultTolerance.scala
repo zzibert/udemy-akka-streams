@@ -29,25 +29,40 @@ object FaultTolerance extends App {
   import akka.stream.stage.GraphStageLogic
   import akka.stream.stage.InHandler
 
-  class Filter[A](p: A => Boolean) extends GraphStage[FlowShape[A, A]] {
+  class Duplicator[A] extends GraphStage[FlowShape[A, A]] {
 
-    val in = Inlet[A]("Filter.in")
-    val out = Outlet[A]("Filter.out")
+    val in = Inlet[A]("Duplicator.in")
+    val out = Outlet[A]("Duplicator.out")
 
     val shape = FlowShape.of(in, out)
 
     override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
       new GraphStageLogic(shape) {
+        // Again: note that all mutable state
+        // MUST be inside the GraphStageLogic
+        var lastElem: Option[A] = None
+
         setHandler(in, new InHandler {
           override def onPush(): Unit = {
             val elem = grab(in)
-            if (p(elem)) push(out, elem)
-            else pull(in)
+            lastElem = Some(elem)
+            push(out, elem)
           }
+
+          override def onUpstreamFinish(): Unit = {
+            if (lastElem.isDefined) emit(out, lastElem.get)
+            complete(out)
+          }
+
         })
         setHandler(out, new OutHandler {
           override def onPull(): Unit = {
-            pull(in)
+            if (lastElem.isDefined) {
+              push(out, lastElem.get)
+              lastElem = None
+            } else {
+              pull(in)
+            }
           }
         })
       }
