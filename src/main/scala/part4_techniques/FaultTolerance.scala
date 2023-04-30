@@ -5,14 +5,14 @@ import akka.actor.{Actor, ActorSystem, Cancellable}
 import akka.stream.scaladsl.GraphDSL.Implicits.{FanInOps, SourceArrow, fanOut2flow}
 import akka.stream.scaladsl.Tcp.OutgoingConnection
 import akka.stream.scaladsl.{Balance, Broadcast, BroadcastHub, Concat, Flow, GraphDSL, Keep, Merge, MergeHub, MergePreferred, PartitionHub, RunnableGraph, Sink, Source, Tcp, Zip, ZipWith}
-import akka.stream.stage.{GraphStageLogic, OutHandler}
+import akka.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler, TimerGraphStageLogic}
 import akka.stream.{ActorMaterializer, Attributes, ClosedShape, CompletionStrategy, DelayOverflowStrategy, FanInShape, FlowShape, Graph, Inlet, KillSwitches, Materializer, Outlet, OverflowStrategy, Shape, SourceShape, UniformFanInShape, UniqueKillSwitch}
 import akka.util.ByteString
 import java.util.concurrent.ThreadLocalRandom
 import org.scalatest.Matchers.{convertToAnyShouldWrapper, equal}
 import scala.annotation.unchecked.uncheckedVariance
 import scala.collection.immutable
-import scala.concurrent.duration.DurationInt
+import scala.concurrent.duration.{DurationInt, FiniteDuration}
 import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.util.{Failure, Success}
 
@@ -23,32 +23,52 @@ object FaultTolerance extends App {
 
   implicit val ec: ExecutionContext = ExecutionContext.global
 
-  import akka.stream.stage.{GraphStage, GraphStageLogic, OutHandler, StageLogging}
+  // each time an event is pushed through it will trigger a period of silence
+  class TimedGate[A](silencePeriod: FiniteDuration) extends GraphStage[FlowShape[A, A]] {
 
-  final class RandomLettersSource extends GraphStage[SourceShape[String]] {
-    val out = Outlet[String]("RandomLettersSource.out")
-    override val shape: SourceShape[String] = SourceShape(out)
+    val in = Inlet[A]("TimedGate.in")
+    val out = Outlet[A]("TimedGate.out")
 
-    override def createLogic(inheritedAttributes: Attributes) =
-      new GraphStageLogic(shape) with StageLogging {
-        setHandler(out, new OutHandler {
-          override def onPull(): Unit = {
-            val c = nextChar() // ASCII lower case letters
+    val shape = FlowShape.of(in, out)
 
-            // `log` is obtained from materializer automatically (via StageLogging)
-            log.debug("Randomly generated: [{}]", c)
+    override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
+      new TimerGraphStageLogic(shape) {
 
-            push(out, c.toString)
+        var open = false
+
+        setHandler(in, new InHandler {
+          override def onPush(): Unit = {
+            val elem = grab(in)
+            if (open) pull(in)
+            else {
+              push(out, elem)
+              open = true
+              scheduleOnce(None, silencePeriod)
+            }
           }
         })
-      }
+        setHandler(out, new OutHandler {
+          override def onPull(): Unit = {
+            pull(in)
+          }
+        })
 
-    def nextChar(): Char =
-      ThreadLocalRandom.current().nextInt('a', 'z'.toInt + 1).toChar
+        override protected def onTimer(timerKey: Any): Unit = {
+          open = false
+        }
+      }
   }
 
-  val randomLettersSource = Source.fromGraph(new RandomLettersSource)
+  val sourceTick = Source.tick(50.millis, 50.millis, "Tick")
 
-  randomLettersSource.take(10).runForeach(println)
+  val sourceNumber = Source.fromIterator(() => Iterator.from(1))
+
+  val sourceCombined = sourceTick.zipWith(sourceNumber) {(tick, number) =>
+    s"$tick : $number"
+  }
+
+  val timerFlow = Flow.fromGraph(new TimedGate[String](200.millis))
+
+  sourceCombined.via(timerFlow).runForeach(println) // 1, 5, 9, 13
 
 }
