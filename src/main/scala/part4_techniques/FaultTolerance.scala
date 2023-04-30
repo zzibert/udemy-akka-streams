@@ -8,6 +8,7 @@ import akka.stream.scaladsl.{Balance, Broadcast, BroadcastHub, Concat, Flow, Gra
 import akka.stream.stage.{GraphStageLogic, OutHandler}
 import akka.stream.{ActorMaterializer, Attributes, ClosedShape, CompletionStrategy, DelayOverflowStrategy, FanInShape, FlowShape, Graph, Inlet, KillSwitches, Materializer, Outlet, OverflowStrategy, Shape, SourceShape, UniformFanInShape, UniqueKillSwitch}
 import akka.util.ByteString
+import java.util.concurrent.ThreadLocalRandom
 import org.scalatest.Matchers.{convertToAnyShouldWrapper, equal}
 import scala.annotation.unchecked.uncheckedVariance
 import scala.collection.immutable
@@ -22,49 +23,32 @@ object FaultTolerance extends App {
 
   implicit val ec: ExecutionContext = ExecutionContext.global
 
-  import akka.stream.Attributes
-  import akka.stream.Inlet
-  import akka.stream.SinkShape
-  import akka.stream.stage.GraphStage
-  import akka.stream.stage.GraphStageLogic
-  import akka.stream.stage.InHandler
+  import akka.stream.stage.{GraphStage, GraphStageLogic, OutHandler, StageLogging}
 
-  class Duplicator[A] extends GraphStage[FlowShape[A, A]] {
+  final class RandomLettersSource extends GraphStage[SourceShape[String]] {
+    val out = Outlet[String]("RandomLettersSource.out")
+    override val shape: SourceShape[String] = SourceShape(out)
 
-    val in = Inlet[A]("Duplicator.in")
-    val out = Outlet[A]("Duplicator.out")
-
-    val shape = FlowShape.of(in, out)
-
-    override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
-      new GraphStageLogic(shape) {
-        // Again: note that all mutable state
-        // MUST be inside the GraphStageLogic
-        var lastElem: Option[A] = None
-
-        setHandler(in, new InHandler {
-          override def onPush(): Unit = {
-            val elem = grab(in)
-            lastElem = Some(elem)
-            push(out, elem)
-          }
-
-          override def onUpstreamFinish(): Unit = {
-            if (lastElem.isDefined) emit(out, lastElem.get)
-            complete(out)
-          }
-
-        })
+    override def createLogic(inheritedAttributes: Attributes) =
+      new GraphStageLogic(shape) with StageLogging {
         setHandler(out, new OutHandler {
           override def onPull(): Unit = {
-            if (lastElem.isDefined) {
-              push(out, lastElem.get)
-              lastElem = None
-            } else {
-              pull(in)
-            }
+            val c = nextChar() // ASCII lower case letters
+
+            // `log` is obtained from materializer automatically (via StageLogging)
+            log.debug("Randomly generated: [{}]", c)
+
+            push(out, c.toString)
           }
         })
       }
+
+    def nextChar(): Char =
+      ThreadLocalRandom.current().nextInt('a', 'z'.toInt + 1).toChar
   }
+
+  val randomLettersSource = Source.fromGraph(new RandomLettersSource)
+
+  randomLettersSource.take(10).runForeach(println)
+
 }
