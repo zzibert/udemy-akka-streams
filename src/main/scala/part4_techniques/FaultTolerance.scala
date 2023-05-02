@@ -1,10 +1,14 @@
 package part4_techniques
 
 
-import akka.actor.{Actor, ActorSystem, Cancellable}
+import akka.NotUsed
+import akka.actor.{Actor, ActorSystem, Cancellable, Props}
+import akka.pattern.ask
 import akka.stream.scaladsl.{Balance, Broadcast, BroadcastHub, Concat, Flow, GraphDSL, Keep, Merge, MergeHub, MergePreferred, PartitionHub, RunnableGraph, Sink, Source, Tcp, Zip, ZipWith}
 import akka.stream.{ActorMaterializer, Attributes, ClosedShape, CompletionStrategy, DelayOverflowStrategy, FanInShape, FlowShape, Graph, Inlet, KillSwitches, Materializer, Outlet, OverflowStrategy, Shape, SourceShape, UniformFanInShape, UniqueKillSwitch}
+import akka.util.Timeout
 import java.util.concurrent.atomic.AtomicInteger
+import scala.concurrent.duration.DurationInt
 import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 
 object FaultTolerance extends App {
@@ -14,35 +18,23 @@ object FaultTolerance extends App {
 
   implicit val ec: ExecutionContext = ExecutionContext.global
 
-  class SometimesSlowService(implicit ec: ExecutionContext) {
+  implicit val askTimeout: Timeout = 5.seconds
+  val words: Source[String, NotUsed] =
+    Source(List("hello", "hi", "ho", "hu", "ha", "trolo", "lolo"))
 
-    private val runningCount = new AtomicInteger
-
-    def convert(s: String): Future[String] = {
-      println(s"running: $s (${runningCount.incrementAndGet()})")
-      Future {
-        if (s.nonEmpty && s.head.isLower)
-          Thread.sleep(500)
-        else
-          Thread.sleep(20)
-        println(s"completed: $s (${runningCount.decrementAndGet()})")
-        s.toUpperCase
-      }
+  class Translator extends Actor {
+    def receive = {
+      case word: String =>
+        // ... process message
+        val reply = word.toUpperCase
+        sender() ! reply // reply to the ask
     }
   }
 
+  val ref = system.actorOf(Props(new Translator))
 
-  val service = new SometimesSlowService
-
-  Source(List("a", "B", "C", "D", "e", "F", "g", "H", "i", "J"))
-    .map(elem => {
-      println(s"before: $elem"); elem
-    })
-    .mapAsync(4)(service.convert)
-    .to(Sink.foreach(elem => println(s"after: $elem")))
-    .withAttributes(Attributes.inputBuffer(initial = 4, max = 4))
-    .run()
-
-  // A, B, C, D, E, F, G, ...
+  words
+    .mapAsyncUnordered(2)(ref ? _)
+    .runForeach(println)
 
 }
